@@ -1,0 +1,143 @@
+@page "/lifecycle"
+
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IEventBus EventBus
+
+<PageTitle>Lifecycle &amp; Error Handling</PageTitle>
+
+<h1>Lifecycle &amp; Error Handling</h1>
+<p>
+    Test subscribe/unsubscribe at runtime, handler errors, and navigation disposal.
+    Navigate away from this page and back — the subscriber count resets, proving <code>Dispose</code> ran.
+</p>
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">Controls</div>
+            <div class="card-body">
+                <button class="btn btn-primary btn-sm me-2" @onclick="PublishAsync">
+                    Publish Event
+                </button>
+                <button class="btn @(_subscribed ? "btn-danger" : "btn-success") btn-sm me-2" @onclick="ToggleSubscription">
+                    @(_subscribed ? "Unsubscribe" : "Subscribe")
+                </button>
+                <button class="btn btn-warning btn-sm" @onclick="PublishWithErrorHandlerAsync">
+                    Publish (with throwing handler)
+                </button>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <div class="card-header bg-dark text-white">Subscription Info</div>
+            <div class="card-body">
+                <p><strong>Subscribed:</strong> @(_subscribed ? "Yes ✅" : "No ❌")</p>
+                <p><strong>Events received:</strong> @_receivedCount</p>
+                <p><strong>Page initialized at:</strong> @_initTime.ToString("HH:mm:ss")</p>
+                <p class="text-muted small">
+                    Navigate to another page and come back — the init time and received count
+                    will reset, confirming <code>Dispose()</code> ran on navigation.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                Event Log <span class="badge bg-light text-dark">@_log.Count</span>
+            </div>
+            <div class="card-body">
+                <ul class="list-group" style="max-height: 300px; overflow-y: auto;">
+                    @foreach (LogEntry entry in _log)
+                    {
+                        <li class="list-group-item py-1 small @entry.Css">@entry.Text</li>
+                    }
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private sealed record LogEntry(string Text, string Css = "");
+
+    private bool _subscribed;
+    private int _receivedCount;
+    private DateTime _initTime;
+    private readonly List<LogEntry> _log = [];
+
+    private IDisposable? _subscription;
+    private IDisposable? _errorSubscription;
+
+    protected override void OnInitialized()
+    {
+        _initTime = DateTime.Now;
+        Subscribe();
+    }
+
+    private void Subscribe()
+    {
+        if (_subscribed) return;
+
+        _subscription = EventBus.Subscribe<CounterChanged>(e =>
+        {
+            _receivedCount++;
+            _log.Insert(0, new LogEntry($"[{DateTime.Now:HH:mm:ss}] Received counter → {e.NewValue}"));
+            InvokeAsync(StateHasChanged);
+        });
+        _subscribed = true;
+        _log.Insert(0, new LogEntry($"[{DateTime.Now:HH:mm:ss}] ✅ Subscribed", "list-group-item-success"));
+        StateHasChanged();
+    }
+
+    private void Unsubscribe()
+    {
+        _subscription?.Dispose();
+        _subscription = null;
+        _subscribed = false;
+        _log.Insert(0, new LogEntry($"[{DateTime.Now:HH:mm:ss}] ❌ Unsubscribed", "list-group-item-warning"));
+        StateHasChanged();
+    }
+
+    private void ToggleSubscription()
+    {
+        if (_subscribed) Unsubscribe();
+        else Subscribe();
+    }
+
+    private Task PublishAsync()
+        => EventBus.PublishAsync(new CounterChanged(_receivedCount + 1));
+
+    private async Task PublishWithErrorHandlerAsync()
+    {
+        // Temporarily subscribe a throwing handler to demonstrate error behavior.
+        _errorSubscription?.Dispose();
+        _errorSubscription = EventBus.Subscribe<CounterChanged>(
+            _ => throw new InvalidOperationException("Intentional handler error!"));
+
+        try
+        {
+            await EventBus.PublishAsync(new CounterChanged(_receivedCount + 1));
+            _log.Insert(0, new LogEntry($"[{DateTime.Now:HH:mm:ss}] Publish completed normally"));
+        }
+        catch (AggregateException ex)
+        {
+            _log.Insert(0, new LogEntry(
+                $"[{DateTime.Now:HH:mm:ss}] ⚠️ AggregateException with {ex.InnerExceptions.Count} error(s): {ex.InnerExceptions[0].Message}",
+                "list-group-item-danger"));
+        }
+        finally
+        {
+            _errorSubscription?.Dispose();
+            _errorSubscription = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        _subscription?.Dispose();
+        _errorSubscription?.Dispose();
+    }
+}

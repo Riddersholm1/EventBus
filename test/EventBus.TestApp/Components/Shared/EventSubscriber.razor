@@ -1,0 +1,71 @@
+@implements IDisposable
+@inject IEventBus EventBus
+
+<div class="card @_themeClass">
+    <div class="card-header bg-success text-white">Subscriber Component</div>
+    <div class="card-body">
+        <p><strong>Counter:</strong> @_counter</p>
+        <p><strong>Last message:</strong> @_lastMessage</p>
+        <p><strong>Theme:</strong> @_themeLabel</p>
+        <h6>Event Log <span class="badge bg-secondary">@_eventLog.Count</span></h6>
+        <ul class="list-group" style="max-height: 250px; overflow-y: auto;">
+            @foreach (string entry in _eventLog)
+            {
+                <li class="list-group-item py-1 small">@entry</li>
+            }
+        </ul>
+    </div>
+</div>
+
+@code {
+    private int _counter;
+    private string _lastMessage = "(none)";
+    private string _themeClass = string.Empty;
+    private string _themeLabel = "Default";
+    private readonly List<string> _eventLog = [];
+
+    private readonly List<IDisposable> _subscriptions = [];
+
+    protected override void OnInitialized()
+    {
+        _subscriptions.Add(EventBus.Subscribe<MessageSent>(e =>
+        {
+            _lastMessage = e.Text;
+            Log($"Message: {e.Text}");
+        }));
+
+        _subscriptions.Add(EventBus.Subscribe<CounterChanged>(e =>
+        {
+            _counter = e.NewValue;
+            Log($"Counter → {e.NewValue}");
+        }));
+
+        _subscriptions.Add(EventBus.Subscribe<ThemeChanged>(e =>
+        {
+            _themeClass = e.CssClass;
+            _themeLabel = e.Label;
+            Log($"Theme → {e.Label}");
+        }));
+
+        _subscriptions.Add(EventBus.Subscribe<NotificationPosted>(e =>
+        {
+            Log($"Notification ({e.Level}): {e.Message}");
+        }));
+    }
+
+    private void Log(string text)
+    {
+        _eventLog.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {text}");
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        foreach (IDisposable subscription in _subscriptions)
+        {
+            subscription.Dispose();
+        }
+
+        _subscriptions.Clear();
+    }
+}

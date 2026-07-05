@@ -1,0 +1,46 @@
+@inject IEventBus EventBus
+
+<div class="card">
+    <div class="card-header bg-primary text-white">Publisher Component</div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label class="form-label">Message</label>
+            <input class="form-control" @bind="_message" @bind:event="oninput" />
+        </div>
+        <button class="btn btn-primary btn-sm me-2" @onclick="SendMessage">
+            Send Message
+        </button>
+        <button class="btn btn-success btn-sm me-2" @onclick="Increment">
+            Counter +1
+        </button>
+        <button class="btn btn-outline-secondary btn-sm me-2" @onclick="@(() => ChangeTheme("bg-light", "Light"))">
+            Light Theme
+        </button>
+        <button class="btn btn-dark btn-sm me-2" @onclick="@(() => ChangeTheme("bg-dark text-white", "Dark"))">
+            Dark Theme
+        </button>
+        <button class="btn btn-warning btn-sm" @onclick="SendNotification">
+            Post Notification
+        </button>
+    </div>
+</div>
+
+@code {
+    private string _message = "Hello from another component!";
+    private int _counter;
+
+    private Task SendMessage()
+        => EventBus.PublishAsync(new MessageSent(_message, DateTime.Now));
+
+    private Task Increment()
+    {
+        _counter++;
+        return EventBus.PublishAsync(new CounterChanged(_counter));
+    }
+
+    private Task ChangeTheme(string css, string label)
+        => EventBus.PublishAsync(new ThemeChanged(css, label));
+
+    private Task SendNotification()
+        => EventBus.PublishAsync(new NotificationPosted($"Counter is at {_counter}", "success"));
+}

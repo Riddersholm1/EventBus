@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/.SolutionItems/">
+    <File Path=".github/workflows/pipeline.yml" />
+    <File Path=".gitignore" />
+    <File Path="LICENSE" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/EventBus/EventBus.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/EventBus.TestApp/EventBus.TestApp.csproj" />
+    <Project Path="test/EventBus.Tests/EventBus.Tests.csproj" />
+  </Folder>
+</Solution>

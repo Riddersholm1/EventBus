@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read  # default; publish job overrides to write
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_QUALITY: "preview"
+  CONFIGURATION: Release
+
+jobs:
+  build-test-pack:
+    name: Build, Test & Pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0 # full history for SourceLink / versioning
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ]; then VERSION="0.0.0-dev"; fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5.2.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-quality: ${{ env.DOTNET_QUALITY }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c ${{ env.CONFIGURATION }} -warnaserror /p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Test
+        run: dotnet test --no-build -c ${{ env.CONFIGURATION }} --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: test-results
+          path: "**/*.trx"
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: "**/coverage.cobertura.xml"
+          fail_ci_if_error: false
+
+      - name: Pack
+        run: dotnet pack src/EventBus/EventBus.csproj --no-build -c ${{ env.CONFIGURATION }} -o ./artifacts /p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nuget-packages
+          path: ./artifacts/*.nupkg
+
+      - name: Upload symbol package
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nuget-symbols
+          path: ./artifacts/*.snupkg
+
+  publish:
+    name: Publish to NuGet.org
+    needs: build-test-pack
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: nuget-packages
+          path: ./artifacts
+
+      - name: Download symbols
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: nuget-symbols
+          path: ./artifacts
+
+      - name: Push to NuGet.org
+        run: dotnet nuget push "./artifacts/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate

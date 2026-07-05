@@ -1,0 +1,29 @@
+﻿<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">EventBus.TestApp</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="nav flex-column">
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Cross-Component
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="async-demo">
+                <span class="bi bi-list-nested-nav-menu" aria-hidden="true"></span> Async &amp; Cancel
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="lifecycle">
+                <span class="bi bi-list-nested-nav-menu" aria-hidden="true"></span> Lifecycle &amp; Errors
+            </NavLink>
+        </div>
+    </nav>
+</div>

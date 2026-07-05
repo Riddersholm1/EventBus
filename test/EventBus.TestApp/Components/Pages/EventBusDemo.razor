@@ -1,0 +1,24 @@
+@page "/"
+@page "/eventbus"
+
+@using EventBus.TestApp.Components.Shared
+
+@rendermode InteractiveServer
+
+<PageTitle>Event Bus Demo</PageTitle>
+
+<h1>Cross-Component Communication</h1>
+<p>
+    The <strong>Publisher</strong> and <strong>Subscriber</strong> below are independent sibling components.
+    They share no parameters — all communication flows through <code>IEventBus</code>.
+    The <strong>notification toast</strong> lives in the layout, proving events cross the entire component tree.
+</p>
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <EventPublisher />
+    </div>
+    <div class="col-md-6">
+        <EventSubscriber />
+    </div>
+</div>

@@ -1,0 +1,122 @@
+@page "/async-demo"
+
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IEventBus EventBus
+
+<PageTitle>Async &amp; Cancellation</PageTitle>
+
+<h1>Async Handlers &amp; Cancellation</h1>
+<p>
+    This page demonstrates <code>PublishAsync</code> with async handlers and cancellation support.
+    Events published on the home page still appear here — the bus is scoped to the circuit.
+</p>
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-info text-white">Async Publisher</div>
+            <div class="card-body">
+                <div class="mb-2">
+                    <label class="form-label">Simulated delay (ms)</label>
+                    <input type="number" class="form-control" @bind="_delayMs" />
+                </div>
+                <button class="btn btn-info btn-sm me-2" @onclick="PublishAsync" disabled="@_publishing">
+                    @(_publishing ? "Publishing…" : "Publish Async")
+                </button>
+                <button class="btn btn-danger btn-sm" @onclick="Cancel" disabled="@(!_publishing)">
+                    Cancel
+                </button>
+                @if (_cancelled)
+                {
+                    <span class="text-danger ms-2">Cancelled!</span>
+                }
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">Async Event Log</div>
+            <div class="card-body">
+                <ul class="list-group" style="max-height: 250px; overflow-y: auto;">
+                    @foreach (string entry in _log)
+                    {
+                        <li class="list-group-item py-1 small">@entry</li>
+                    }
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private int _delayMs = 1000;
+    private bool _publishing;
+    private bool _cancelled;
+    private CancellationTokenSource? _cts;
+    private readonly List<string> _log = [];
+
+    private IDisposable? _sub1;
+    private IDisposable? _sub2;
+
+    protected override void OnInitialized()
+    {
+        // Async handler with simulated delay
+        _sub1 = EventBus.Subscribe<MessageSent>(async (e, ct) =>
+        {
+            Log($"⏳ Async handler started: {e.Text}");
+            await Task.Delay(_delayMs, ct);
+            Log($"✅ Async handler completed: {e.Text}");
+        });
+
+        // Sync handler to show ordering
+        _sub2 = EventBus.Subscribe<MessageSent>(e =>
+        {
+            Log($"⚡ Sync handler: {e.Text}");
+        });
+    }
+
+    private async Task PublishAsync()
+    {
+        _publishing = true;
+        _cancelled = false;
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            Log("Publishing async…");
+            await EventBus.PublishAsync(new MessageSent("Async event", DateTime.Now), _cts.Token);
+            Log("Publish completed.");
+        }
+        catch (OperationCanceledException)
+        {
+            _cancelled = true;
+            Log("⛔ Publish was cancelled.");
+        }
+        finally
+        {
+            _publishing = false;
+            _cts.Dispose();
+            _cts = null;
+        }
+    }
+
+    private void Cancel()
+    {
+        _cts?.Cancel();
+    }
+
+    private void Log(string text)
+    {
+        _log.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {text}");
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        _sub1?.Dispose();
+        _sub2?.Dispose();
+        _cts?.Dispose();
+    }
+}
