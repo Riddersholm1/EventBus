@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 
 namespace EventBus;
@@ -32,6 +32,16 @@ internal sealed class EventBus : IEventBus, IDisposable
     }
 
     /// <inheritdoc />
+    public IDisposable Subscribe<TEvent>(Func<TEvent, Task> handler) where TEvent : notnull
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        var subscription = new TaskSubscription<TEvent>(this, handler);
+        AddSubscription(typeof(TEvent), subscription);
+        return subscription;
+    }
+
+    /// <inheritdoc />
     public IDisposable Subscribe<TEvent>(Func<TEvent, CancellationToken, Task> handler) where TEvent : notnull
     {
         ArgumentNullException.ThrowIfNull(handler);
@@ -55,16 +65,25 @@ internal sealed class EventBus : IEventBus, IDisposable
         List<Exception>? errors = null;
         foreach (Subscription subscription in snapshot)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                throw Cancelled(errors, cancellationToken);
+            }
 
             try
             {
                 await subscription.InvokeAsync(eventData, cancellationToken)
                     .ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && errors is null)
+            {
+                // Nothing has failed yet, so the handler's own exception is the
+                // most informative thing we can surface. Preserve its stack.
+                throw;
+            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                throw;
+                throw Cancelled(errors, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -83,6 +102,11 @@ internal sealed class EventBus : IEventBus, IDisposable
     /// owning scope ends (or when the application shuts down, for a singleton
     /// registration); rarely needs to be called by user code.
     /// </summary>
+    /// <remarks>
+    /// A publish already in flight keeps running against the snapshot it took, so
+    /// disposing the bus does not abort handlers that have already started.
+    /// Disposal is idempotent and safe to call concurrently.
+    /// </remarks>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
@@ -92,6 +116,22 @@ internal sealed class EventBus : IEventBus, IDisposable
 
         _subscriptions.Clear();
     }
+
+    /// <summary>
+    /// Builds the exception thrown when <paramref name="token"/> is cancelled
+    /// mid-publish. Handler failures collected before the cancellation was
+    /// observed are carried along as an inner <see cref="AggregateException"/>
+    /// rather than discarded, so a cancelled publish never silently loses
+    /// diagnostics.
+    /// </summary>
+    private static OperationCanceledException Cancelled(List<Exception>? errors, CancellationToken token)
+        => errors is { Count: > 0 }
+            ? new OperationCanceledException(
+                "The publish operation was cancelled after one or more handlers had already thrown. " +
+                "See the inner AggregateException for those failures.",
+                new AggregateException(errors),
+                token)
+            : new OperationCanceledException(token);
 
     /// <summary>
     /// Adds a subscription, throwing <see cref="ObjectDisposedException"/>
@@ -113,7 +153,7 @@ internal sealed class EventBus : IEventBus, IDisposable
         // If Dispose() ran between ThrowIfDisposed and AddOrUpdate, the
         // subscription was re-added to an already-cleared dictionary.
         // Detect that and roll back.
-        if (_disposed != 1)
+        if (Volatile.Read(ref _disposed) != 1)
         {
             return;
         }
@@ -156,7 +196,10 @@ internal sealed class EventBus : IEventBus, IDisposable
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed == 1, this);
+        // Volatile so the check can't be hoisted or reused across the
+        // check → insert → recheck sequence in AddSubscription on weak memory
+        // models (ARM64: MAUI, Apple silicon, ARM servers).
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
     }
 
     /// <summary>
@@ -170,6 +213,17 @@ internal sealed class EventBus : IEventBus, IDisposable
         protected abstract Type EventType { get; }
 
         public abstract Task InvokeAsync(object @event, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Thrown when a <see cref="Task"/>-returning handler hands back
+        /// <see langword="null"/> — almost always an unstubbed mock. Without
+        /// this the caller would see an opaque <see cref="NullReferenceException"/>
+        /// with no indication of which handler was at fault.
+        /// </summary>
+        protected static InvalidOperationException NullTask(Type eventType)
+            => new($"An asynchronous handler for event type '{eventType}' returned a null Task. " +
+                   "Handlers must return a non-null Task; a null return usually means the handler " +
+                   "is an unconfigured test double.");
 
         public void Dispose()
         {
@@ -194,12 +248,21 @@ internal sealed class EventBus : IEventBus, IDisposable
         }
     }
 
+    private sealed class TaskSubscription<TEvent>(EventBus bus, Func<TEvent, Task> handler)
+        : Subscription(bus) where TEvent : notnull
+    {
+        protected override Type EventType => typeof(TEvent);
+
+        public override Task InvokeAsync(object @event, CancellationToken cancellationToken)
+            => handler((TEvent)@event) ?? throw NullTask(typeof(TEvent));
+    }
+
     private sealed class AsyncSubscription<TEvent>(EventBus bus, Func<TEvent, CancellationToken, Task> handler)
         : Subscription(bus) where TEvent : notnull
     {
         protected override Type EventType => typeof(TEvent);
 
         public override Task InvokeAsync(object @event, CancellationToken cancellationToken)
-            => handler((TEvent)@event, cancellationToken);
+            => handler((TEvent)@event, cancellationToken) ?? throw NullTask(typeof(TEvent));
     }
 }

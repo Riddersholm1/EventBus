@@ -14,7 +14,7 @@ permissions:
 
 env:
   DOTNET_VERSION: "10.0.x"
-  DOTNET_QUALITY: "preview"
+  DOTNET_QUALITY: "ga"
   CONFIGURATION: Release
 
 jobs:
@@ -28,12 +28,23 @@ jobs:
         with:
           fetch-depth: 0 # full history for SourceLink / versioning
 
+      # On a release, the tag drives the version. Otherwise fall back to the
+      # version in the project file rather than a literal like 0.0.0-dev: package
+      # validation compares the built assembly against the published baseline and
+      # rejects an assembly version lower than it.
       - name: Resolve version
         id: version
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
-          if [ -z "$VERSION" ]; then VERSION="0.0.0-dev"; fi
+          if [ -z "$VERSION" ]; then
+            VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/EventBus/EventBus.csproj | head -1)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not resolve a version from the release tag or src/EventBus/EventBus.csproj."
+            exit 1
+          fi
+          echo "Resolved version: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Setup .NET
@@ -46,7 +57,7 @@ jobs:
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --no-restore -c ${{ env.CONFIGURATION }} -warnaserror /p:Version=${{ steps.version.outputs.VERSION }}
+        run: dotnet build --no-restore -c ${{ env.CONFIGURATION }} -warnaserror -p:ContinuousIntegrationBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Test
         run: dotnet test --no-build -c ${{ env.CONFIGURATION }} --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage"
@@ -67,7 +78,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Pack
-        run: dotnet pack src/EventBus/EventBus.csproj --no-build -c ${{ env.CONFIGURATION }} -o ./artifacts /p:Version=${{ steps.version.outputs.VERSION }}
+        run: dotnet pack src/EventBus/EventBus.csproj --no-build -c ${{ env.CONFIGURATION }} -o ./artifacts -p:ContinuousIntegrationBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Upload NuGet package
         uses: actions/upload-artifact@v7.0.1
@@ -91,6 +102,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5.2.0
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-quality: ${{ env.DOTNET_QUALITY }}
+
       - name: Download packages
         uses: actions/download-artifact@v8.0.1
         with:
@@ -103,5 +120,19 @@ jobs:
           name: nuget-symbols
           path: ./artifacts
 
+      # The API key is passed through the environment and quoted. Interpolating
+      # it directly into the command line silently shifts every later argument
+      # when the secret is unset, which is what broke the v1.0.0 release: the
+      # push failed with the misleading "Source parameter was not specified".
       - name: Push to NuGet.org
-        run: dotnet nuget push "./artifacts/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::The NUGET_API_KEY repository secret is not set, so the package cannot be published. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          dotnet nuget push "./artifacts/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

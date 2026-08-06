@@ -1,3 +1,9 @@
+@* This component lives in MainLayout, which renders statically. Without an
+   explicit render mode it would subscribe in the request scope while the
+   interactive page publishes on the circuit scope — two different scoped
+   buses, so the toast would never fire. Declaring the render mode makes it an
+   interactive island that shares the circuit's bus. *@
+@rendermode InteractiveServer
 @implements IDisposable
 @inject IEventBus EventBus
 

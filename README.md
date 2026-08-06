@@ -4,12 +4,6 @@
 [![Coverage](https://codecov.io/gh/Riddersholm1/EventBus/branch/main/graph/badge.svg)](https://codecov.io/gh/Riddersholm1/EventBus)
 [![Latest Release](https://img.shields.io/github/v/release/Riddersholm1/EventBus?include_prereleases)](https://github.com/Riddersholm1/EventBus/releases)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Riddersholm.EventBus)](https://www.nuget.org/packages/Riddersholm.EventBus)
-[![Stars](https://img.shields.io/github/stars/Riddersholm1/EventBus)](https://github.com/Riddersholm1/EventBus/stargazers)
-[![Contributors](https://img.shields.io/github/contributors/Riddersholm1/EventBus)](https://github.com/Riddersholm1/EventBus/graphs/contributors)
-[![Last Commit](https://img.shields.io/github/last-commit/Riddersholm1/EventBus)](https://github.com/Riddersholm1/EventBus/commits/main)
-[![Commit Activity](https://img.shields.io/github/commit-activity/m/Riddersholm1/EventBus)](https://github.com/Riddersholm1/EventBus/graphs/commit-activity)
-[![Issues](https://img.shields.io/github/issues/Riddersholm1/EventBus)](https://github.com/Riddersholm1/EventBus/issues)
-[![Release Strategy](https://img.shields.io/badge/release%20strategy-githubflow-orange)](https://githubflow.github.io)
 
 A lightweight, **in-process** event aggregator for .NET — loosely coupled
 publish/subscribe messaging between components without them having to know about
@@ -58,6 +52,10 @@ builder.Services.AddEventBus(ServiceLifetime.Singleton);
 
 `IEventBus` is now resolvable wherever you inject it.
 
+Register the bus **once**. `AddEventBus` is additive-once: a second call is
+ignored, *including its lifetime*, so calling it with `Scoped` and later with
+`Singleton` silently leaves the bus scoped.
+
 ## Define an event
 
 Events are plain types — the recommended form is a `sealed record` so they're
@@ -70,9 +68,7 @@ public sealed record UserLoggedIn(string UserId, DateTimeOffset At);
 
 ## Publish
 
-Publishing is always asynchronous. `PublishAsync` invokes both sync and async
-handlers — sync handlers execute inline, async handlers are awaited one after
-another in subscription order.
+Publishing is always asynchronous.
 
 ```csharp
 private readonly IEventBus _bus;
@@ -90,6 +86,19 @@ private async Task IncrementAsync()
 Subscriptions are `IDisposable`. Keep the token and dispose it when your
 subscriber is torn down.
 
+There are three handler shapes; the compiler picks the right one from your lambda:
+
+```csharp
+// Synchronous
+bus.Subscribe<CounterIncremented>(e => _value = e.NewValue);
+
+// Asynchronous
+bus.Subscribe<UserLoggedIn>(async e => await _audit.RecordAsync(e));
+
+// Asynchronous, with the publisher's cancellation token
+bus.Subscribe<UserLoggedIn>(async (e, ct) => await _audit.RecordAsync(e, ct));
+```
+
 ### In a plain service (constructor injection)
 
 ```csharp
@@ -106,7 +115,7 @@ public sealed class AuditService : IDisposable
 }
 ```
 
-### In a Blazor component (sync handler)
+### In a Blazor component
 
 ```csharp
 @implements IDisposable
@@ -129,30 +138,32 @@ private void OnCounterIncremented(CounterIncremented e)
 public void Dispose() => _subscription?.Dispose();
 ```
 
-### Async handler
-
-```csharp
-_subscription = EventBus.Subscribe<UserLoggedIn>(async (e, ct) =>
-{
-    await _audit.RecordAsync(e, ct);
-    // In Blazor: await InvokeAsync(StateHasChanged);
-});
-```
-
-The cancellation token comes from the publisher's `PublishAsync` call.
-
 ## Publish semantics
 
 `PublishAsync` is the single publish entry point.
 
-| Handler kind | Behavior                                    |
-| ------------ | ------------------------------------------- |
-| Sync         | Invoked inline on the publishing thread     |
-| Async        | Awaited sequentially, in subscription order |
+| Handler kind | Behavior |
+| ------------ | -------- |
+| `Action<TEvent>` | Invoked inline on the publishing thread |
+| `Func<TEvent, Task>` | Awaited before the next handler runs |
+| `Func<TEvent, CancellationToken, Task>` | Awaited before the next handler runs, receives the publisher's token |
 
-Handlers run **sequentially** within a single publish for deterministic
-ordering. If a handler throws, every other handler still runs; the exceptions
-are aggregated into an `AggregateException`.
+Handlers run **sequentially**, in subscription order, for deterministic
+ordering. If a handler throws, every other handler still runs; the exceptions are
+aggregated into an `AggregateException`. A handler that throws stays subscribed.
+
+**Routing is on the compile-time type.** `PublishAsync` dispatches on
+`TEvent`, not on `eventData.GetType()`. Publishing through a base-typed variable
+reaches only subscribers of that base type:
+
+```csharp
+BaseEvent e = new DerivedEvent(...);
+await bus.PublishAsync(e);              // TEvent is BaseEvent — DerivedEvent subscribers do NOT fire
+await bus.PublishAsync(new DerivedEvent(...));  // TEvent is DerivedEvent — these do
+```
+
+Handlers run on the publishing thread's context, so a handler that publishes its
+own event type recurses and will exhaust the stack.
 
 ## Disposal & lifetime
 
@@ -160,7 +171,8 @@ are aggregated into an `AggregateException`.
   to dispose multiple times.
 - **Bus**: disposed automatically by the DI container when its scope ends
   (scoped) or when the application shuts down (singleton). After disposal,
-  `Subscribe` and `PublishAsync` throw `ObjectDisposedException`.
+  `Subscribe` and `PublishAsync` throw `ObjectDisposedException`. A publish
+  already in flight finishes against the snapshot it took.
 
 **Always dispose your subscriptions** — otherwise the bus holds a strong
 reference to the subscriber for the lifetime of the bus. With a singleton bus
@@ -184,7 +196,20 @@ The bus is safe for concurrent use:
 await bus.PublishAsync(new UserLoggedIn(id, DateTimeOffset.UtcNow), ct);
 ```
 
-The token is checked before each handler and flowed to every async handler.
+The token is checked before each handler and flowed to every handler that asks
+for one. When it is signalled, `PublishAsync` throws `OperationCanceledException`
+and the remaining handlers do not run.
+
+If handlers had already thrown before the cancellation was observed, those
+exceptions are **not** discarded — they are attached as an inner
+`AggregateException`:
+
+```csharp
+catch (OperationCanceledException ex) when (ex.InnerException is AggregateException failures)
+{
+    // handlers that failed before the publish was cancelled
+}
+```
 
 ## Why is publish async-only?
 
@@ -192,8 +217,8 @@ There is a single async-first publish API and no synchronous `Publish`. A sync
 publish would have to block on (or fire-and-forget) any registered async
 handler — the classic sync-over-async footgun that risks deadlocks and swallows
 exceptions. `PublishAsync` invokes both sync and async handlers correctly, and
-when every handler is synchronous it completes synchronously with no thread hop,
-so the async overhead is effectively zero.
+when every handler is synchronous it completes synchronously, without a thread
+hop (the returned task is already completed when it comes back).
 
 ## FAQ
 
@@ -213,6 +238,25 @@ pattern. Always dispose your subscriptions.
 **Can I subscribe to a base type and receive derived events?**
 No, subscription is type-exact. Subscribing to `BaseEvent` does not pick up
 `DerivedEvent : BaseEvent`. This keeps routing fast and the semantics obvious.
+See [Publish semantics](#publish-semantics) for the publishing side of the same rule.
+
+## Upgrading to 1.1.0
+
+1.1.0 adds a `Subscribe<TEvent>(Func<TEvent, Task>)` overload. The addition is
+binary-compatible, but it changes which overload some source binds to when you
+**recompile**:
+
+- `Subscribe<T>(async e => …)` previously bound to `Action<T>`, making it an
+  `async void` handler — never awaited, and its exceptions unobservable (in
+  Blazor Server, enough to tear down the circuit). It now binds to
+  `Func<T, Task>` and is awaited properly. This is the point of the change.
+- `Subscribe<T>(e => SomeTaskReturningMethod(e))` moves the same way, from
+  fire-and-forget to awaited.
+- Statement lambdas that return nothing (`e => { _value = e.N; }`) and the
+  two-parameter form (`async (e, ct) => …`) are unaffected.
+
+If you were relying on a handler *not* being awaited, start it explicitly inside
+a synchronous handler instead.
 
 ## License
 
