@@ -9,8 +9,12 @@ on:
     types: [published]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
-  contents: read  # default; publish job overrides to write
+  contents: read
 
 env:
   DOTNET_VERSION: "10.0.x"
@@ -24,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0 # full history for SourceLink / versioning
 
@@ -37,18 +41,21 @@ jobs:
         run: |
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
+
           if [ -z "$VERSION" ]; then
             VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/EventBus/EventBus.csproj | head -1)
           fi
+
           if [ -z "$VERSION" ]; then
             echo "::error::Could not resolve a version from the release tag or src/EventBus/EventBus.csproj."
             exit 1
           fi
+
           echo "Resolved version: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5.2.0
+        uses: actions/setup-dotnet@v6.0.0
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           dotnet-quality: ${{ env.DOTNET_QUALITY }}
@@ -57,7 +64,13 @@ jobs:
         run: dotnet restore
 
       - name: Build
-        run: dotnet build --no-restore -c ${{ env.CONFIGURATION }} -warnaserror -p:ContinuousIntegrationBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
+        run: >
+          dotnet build
+          --no-restore
+          -c ${{ env.CONFIGURATION }}
+          -warnaserror
+          -p:ContinuousIntegrationBuild=true
+          /p:Version=${{ steps.version.outputs.VERSION }}
 
       # xunit.v3 4.x runs on Microsoft.Testing.Platform, so the old VSTest flags
       # (--logger trx, --collect "XPlat Code Coverage") no longer apply. Options
@@ -77,14 +90,20 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v6.0.0
+        uses: codecov/codecov-action@v7.1.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: "**/coverage.cobertura.xml"
           fail_ci_if_error: false
 
       - name: Pack
-        run: dotnet pack src/EventBus/EventBus.csproj --no-build -c ${{ env.CONFIGURATION }} -o ./artifacts -p:ContinuousIntegrationBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
+        run: >
+          dotnet pack src/EventBus/EventBus.csproj
+          --no-build
+          -c ${{ env.CONFIGURATION }}
+          -o ./artifacts
+          -p:ContinuousIntegrationBuild=true
+          /p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Upload NuGet package
         uses: actions/upload-artifact@v7.0.1
@@ -104,12 +123,17 @@ jobs:
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
 
+    # Trusted publishing swaps a GitHub OIDC token for a short-lived NuGet API
+    # key, so no long-lived secret is stored here. `id-token: write` is what lets
+    # the runner mint that OIDC token; a job-level block replaces the workflow
+    # default entirely, so `contents: read` is restated rather than inherited.
     permissions:
-      contents: write
+      id-token: write
+      contents: read
 
     steps:
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5.2.0
+        uses: actions/setup-dotnet@v6.0.0
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           dotnet-quality: ${{ env.DOTNET_QUALITY }}
@@ -126,18 +150,34 @@ jobs:
           name: nuget-symbols
           path: ./artifacts
 
-      # The API key is passed through the environment and quoted. Interpolating
-      # it directly into the command line silently shifts every later argument
-      # when the secret is unset, which is what broke the v1.0.0 release: the
-      # push failed with the misleading "Source parameter was not specified".
-      - name: Push to NuGet.org
+      # Checked up front so a missing variable reports itself plainly instead of
+      # surfacing as an opaque OIDC exchange failure inside the login action.
+      - name: Verify trusted publishing configuration
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_USER: ${{ vars.NUGET_USER }}
         run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "::error::The NUGET_API_KEY repository secret is not set, so the package cannot be published. Add it under Settings > Secrets and variables > Actions."
+          if [ -z "$NUGET_USER" ]; then
+            echo "::error::The NUGET_USER repository variable is not set. It must be your NuGet.org username, and it must match the owner of the trusted publishing policy 'EventBus-GitHubActions'. Add it under Settings > Secrets and variables > Actions > Variables."
             exit 1
           fi
+          echo "Publishing to NuGet.org as '$NUGET_USER' via trusted publishing."
+
+      - name: NuGet login (trusted publishing)
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      # Pushing the .nupkg also uploads the matching .snupkg sitting beside it.
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::Trusted publishing returned an empty API key. Check that the 'EventBus-GitHubActions' policy on NuGet.org points at repository ${{ github.repository }} and workflow 'pipeline.yml', and that it is still enabled."
+            exit 1
+          fi
+
           dotnet nuget push "./artifacts/*.nupkg" \
             --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json \
