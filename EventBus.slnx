@@ -2,6 +2,7 @@
   <Folder Name="/.SolutionItems/">
     <File Path=".github/workflows/pipeline.yml" />
     <File Path=".gitignore" />
+    <File Path="global.json" />
     <File Path="LICENSE" />
     <File Path="README.md" />
   </Folder>
