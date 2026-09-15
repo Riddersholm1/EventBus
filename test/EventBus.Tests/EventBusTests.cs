@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace EventBus.Tests;
 
 public sealed record CounterIncremented(int NewValue);
@@ -10,35 +12,50 @@ public sealed record DerivedEvent(string Name) : BaseEvent(Name);
 /// <summary>Value-type event: <c>TEvent : notnull</c> permits structs.</summary>
 public readonly record struct TickEvent(long Ticks);
 
-public class EventBusTests
+/// <summary>
+/// xUnit builds a new instance of this class for every test, so the bus and
+/// token source below are per-test state, not shared fixtures. Holding them as
+/// fields (rather than <c>using</c> locals) also keeps handler lambdas from
+/// capturing a local that is disposed later in the same method.
+/// </summary>
+public class EventBusTests : IDisposable
 {
+    private readonly EventBus _bus = new();
+    private readonly CancellationTokenSource _cts = new();
+
+    public void Dispose()
+    {
+        _bus.Dispose();
+        _cts.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
     [Fact]
     public async Task Subscribe_SyncHandler_ReceivesPublishedEvent()
     {
-        using var bus = new EventBus();
         CounterIncremented? received = null;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(e => received = e);
-        await bus.PublishAsync(new CounterIncremented(42), TestContext.Current.CancellationToken);
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(e => received = e);
+        await _bus.PublishAsync(new CounterIncremented(42), TestContext.Current.CancellationToken);
 
-        Assert.Equal(new CounterIncremented(42), received);
+        Assert.NotNull(received);
+        Assert.Equal(42, received.NewValue);
     }
 
     [Fact]
     public async Task PublishAsync_InvokesHandlersInSubscriptionOrder()
     {
-        using var bus = new EventBus();
         var order = new List<int>();
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => order.Add(1));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => order.Add(1));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             await Task.Yield();
             order.Add(2);
         });
-        using IDisposable s3 = bus.Subscribe<CounterIncremented>(_ => order.Add(3));
+        using IDisposable s3 = _bus.Subscribe<CounterIncremented>(_ => order.Add(3));
 
-        await bus.PublishAsync(new CounterIncremented(0), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(0), TestContext.Current.CancellationToken);
 
         Assert.Equal([1, 2, 3], order);
     }
@@ -46,13 +63,12 @@ public class EventBusTests
     [Fact]
     public async Task Dispose_Subscription_StopsReceivingEvents()
     {
-        using var bus = new EventBus();
         var count = 0;
 
-        IDisposable subscription = bus.Subscribe<CounterIncremented>(_ => count++);
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        IDisposable subscription = _bus.Subscribe<CounterIncremented>(_ => count++);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
         subscription.Dispose();
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, count);
     }
@@ -66,7 +82,7 @@ public class EventBusTests
         Assert.Throws<ObjectDisposedException>(() =>
             bus.Subscribe<CounterIncremented>(_ => { }));
         Assert.Throws<ObjectDisposedException>(() =>
-            bus.Subscribe<CounterIncremented>((Func<CounterIncremented, Task>)(_ => Task.CompletedTask)));
+            bus.Subscribe<CounterIncremented>(_ => Task.CompletedTask));
         Assert.Throws<ObjectDisposedException>(() =>
             bus.Subscribe<CounterIncremented>((_, _) => Task.CompletedTask));
     }
@@ -93,33 +109,30 @@ public class EventBusTests
     [Fact]
     public void Subscribe_NullHandler_Throws()
     {
-        using var bus = new EventBus();
 
         // Each overload is named explicitly: with three delegate shapes in play,
         // a bare `null` literal is an ambiguous call.
         Assert.Throws<ArgumentNullException>(() =>
-            bus.Subscribe((Action<CounterIncremented>)null!));
+            _bus.Subscribe((Action<CounterIncremented>)null!));
         Assert.Throws<ArgumentNullException>(() =>
-            bus.Subscribe((Func<CounterIncremented, Task>)null!));
+            _bus.Subscribe((Func<CounterIncremented, Task>)null!));
         Assert.Throws<ArgumentNullException>(() =>
-            bus.Subscribe((Func<CounterIncremented, CancellationToken, Task>)null!));
+            _bus.Subscribe((Func<CounterIncremented, CancellationToken, Task>)null!));
     }
 
     [Fact]
     public async Task PublishAsync_NullEvent_Throws()
     {
-        using var bus = new EventBus();
         await Assert.ThrowsAsync<ArgumentNullException>(
-            () => bus.PublishAsync<CounterIncremented>(null!, TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync<CounterIncremented>(null!, TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task PublishAsync_NoSubscribers_DoesNothing()
     {
-        using var bus = new EventBus();
 
         Exception? exception = await Record.ExceptionAsync(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
 
         Assert.Null(exception);
     }
@@ -127,15 +140,14 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_SyncHandlerThrows_AggregatesAllExceptionsAndRunsAllHandlers()
     {
-        using var bus = new EventBus();
         var later = false;
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("a"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(_ => throw new ArgumentException("b"));
-        using IDisposable s3 = bus.Subscribe<CounterIncremented>(_ => later = true);
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("a"));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(_ => throw new ArgumentException("b"));
+        using IDisposable s3 = _bus.Subscribe<CounterIncremented>(_ => later = true);
 
         var ex = await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
 
         Assert.Equal(2, ex.InnerExceptions.Count);
         Assert.Contains(ex.InnerExceptions, e => e is InvalidOperationException);
@@ -146,17 +158,16 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_MixedHandlersThrow_AggregatesAllExceptions()
     {
-        using var bus = new EventBus();
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("a"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("a"));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             await Task.Yield();
             throw new ArgumentException("b");
         });
 
         var ex = await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
 
         Assert.Equal(2, ex.InnerExceptions.Count);
         Assert.Contains(ex.InnerExceptions, e => e is InvalidOperationException);
@@ -166,19 +177,18 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_HandlerThrows_SubscriptionStaysActive()
     {
-        using var bus = new EventBus();
         var calls = 0;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(_ =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(_ =>
         {
             calls++;
             throw new InvalidOperationException("always");
         });
 
         await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken));
 
         Assert.Equal(2, calls);
     }
@@ -186,57 +196,51 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_CancelledToken_Throws()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
         var handlerCalled = false;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(_ => handlerCalled = true);
-        await cts.CancelAsync();
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(_ => handlerCalled = true);
+        await _cts.CancelAsync();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+            () => _bus.PublishAsync(new CounterIncremented(1), _cts.Token));
         Assert.False(handlerCalled);
     }
 
     [Fact]
     public async Task PublishAsync_FlowsCancellationTokenToHandlers()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
         CancellationToken received = CancellationToken.None;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>((_, ct) =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>((_, ct) =>
         {
             received = ct;
             return Task.CompletedTask;
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), cts.Token);
+        await _bus.PublishAsync(new CounterIncremented(1), _cts.Token);
 
-        Assert.Equal(cts.Token, received);
+        Assert.Equal(_cts.Token, received);
     }
 
     [Fact]
     public async Task PublishAsync_Cancellation_MidFlight_StopsSubsequentHandlers()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
         var handlerOrder = new List<string>();
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             handlerOrder.Add("first-start");
-            await cts.CancelAsync();
+            await _cts.CancelAsync();
             handlerOrder.Add("first-end");
         });
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>((_, _) =>
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>((_, _) =>
         {
             handlerOrder.Add("second");
             return Task.CompletedTask;
         });
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+            () => _bus.PublishAsync(new CounterIncremented(1), _cts.Token));
 
         Assert.Contains("first-start", handlerOrder);
         Assert.Contains("first-end", handlerOrder);
@@ -246,18 +250,16 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_HandlerThrows_ThenTokenCancelledBetweenHandlers_PreservesHandlerErrors()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
         var thirdRan = false;
 
         // Cancellation is detected by the loop's pre-flight check between handlers,
         // rather than surfacing out of a handler (see the companion test below).
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(_ => cts.Cancel());
-        using IDisposable s3 = bus.Subscribe<CounterIncremented>(_ => thirdRan = true);
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(_ => _cts.Cancel());
+        using IDisposable s3 = _bus.Subscribe<CounterIncremented>(_ => thirdRan = true);
 
         var ex = await Assert.ThrowsAsync<OperationCanceledException>(
-            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+            () => _bus.PublishAsync(new CounterIncremented(1), _cts.Token));
 
         // Cancellation must not silently swallow failures that already happened.
         var inner = Assert.IsType<AggregateException>(ex.InnerException);
@@ -270,20 +272,18 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_HandlerThrows_ThenHandlerObservesCancellation_PreservesBoth()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async (_, ct) =>
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(async (_, ct) =>
         {
             // Cancel and observe it from inside the handler, so the OperationCanceledException
             // comes out of the handler rather than the loop's own pre-flight check.
-            await cts.CancelAsync();
+            await _cts.CancelAsync();
             ct.ThrowIfCancellationRequested();
         });
 
         var ex = await Assert.ThrowsAsync<OperationCanceledException>(
-            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+            () => _bus.PublishAsync(new CounterIncremented(1), _cts.Token));
 
         var inner = Assert.IsType<AggregateException>(ex.InnerException);
         Exception single = Assert.Single(inner.InnerExceptions);
@@ -293,51 +293,49 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_HandlerObservesCancellation_PropagatesHandlerException()
     {
-        using var bus = new EventBus();
-        using var cts = new CancellationTokenSource();
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(async (_, ct) =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(async (_, ct) =>
         {
-            await cts.CancelAsync();
+            await _cts.CancelAsync();
             ct.ThrowIfCancellationRequested();
         });
 
         // Nothing failed beforehand, so the handler's own exception surfaces as-is.
         OperationCanceledException ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+            () => _bus.PublishAsync(new CounterIncremented(1), _cts.Token));
         Assert.Null(ex.InnerException);
     }
 
     [Fact]
     public async Task DifferentEventTypes_Are_Independent()
     {
-        using var bus = new EventBus();
         var counterHits = 0;
         var loginHits = 0;
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => counterHits++);
-        using IDisposable s2 = bus.Subscribe<UserLoggedIn>(_ => loginHits++);
+        string? loginUser = null;
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => counterHits++);
+        using IDisposable s2 = _bus.Subscribe<UserLoggedIn>(e => { loginHits++; loginUser = e.UserId; });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
-        await bus.PublishAsync(new UserLoggedIn("u"), TestContext.Current.CancellationToken);
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new UserLoggedIn("u"), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(2, counterHits);
         Assert.Equal(1, loginHits);
+        Assert.Equal("u", loginUser);
     }
 
     [Fact]
     public async Task MultipleSubscriptions_To_Same_Event_All_Fire()
     {
-        using var bus = new EventBus();
         var a = 0;
         var b = 0;
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => a++);
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(_ => b++);
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => a++);
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(_ => b++);
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(2, a);
         Assert.Equal(2, b);
@@ -346,16 +344,15 @@ public class EventBusTests
     [Fact]
     public async Task Unsubscribing_One_Leaves_Others_Active()
     {
-        using var bus = new EventBus();
         var a = 0;
         var b = 0;
 
-        IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => a++);
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(_ => b++);
+        IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => a++);
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(_ => b++);
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
         s1.Dispose();
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, a);
         Assert.Equal(2, b);
@@ -364,18 +361,17 @@ public class EventBusTests
     [Fact]
     public async Task SyncHandler_Can_Unsubscribe_Itself_During_Publish()
     {
-        using var bus = new EventBus();
         var count = 0;
-        IDisposable? self = null;
+        var self = new StrongBox<IDisposable>();
 
-        self = bus.Subscribe<CounterIncremented>(_ =>
+        self.Value = _bus.Subscribe<CounterIncremented>(_ =>
         {
             count++;
-            self!.Dispose();
+            self.Value!.Dispose();
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken); // should not fire
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken); // should not fire
 
         Assert.Equal(1, count);
     }
@@ -383,62 +379,65 @@ public class EventBusTests
     [Fact]
     public async Task Handler_Can_Subscribe_New_Handler_During_Publish()
     {
-        using var bus = new EventBus();
         var hits = new List<string>();
-        IDisposable? inner = null;
+        var inner = new List<IDisposable>();
 
-        using IDisposable outer = bus.Subscribe<CounterIncremented>(_ =>
+        using IDisposable outer = _bus.Subscribe<CounterIncremented>(_ =>
         {
             hits.Add("outer");
-            inner ??= bus.Subscribe<CounterIncremented>(_ => hits.Add("inner"));
+            if (inner.Count == 0)
+            {
+                inner.Add(_bus.Subscribe<CounterIncremented>(_ => hits.Add("inner")));
+            }
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
         // Snapshot isolation: inner handler was added mid-publish, should not fire yet.
         Assert.Equal(["outer"], hits);
 
         hits.Clear();
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
         Assert.Contains("outer", hits);
         Assert.Contains("inner", hits);
 
-        inner?.Dispose();
+        foreach (IDisposable subscription in inner)
+        {
+            subscription.Dispose();
+        }
     }
 
     [Fact]
     public async Task PublishAsync_HandlerUnsubscribedMidPublish_StillRunsFromSnapshot()
     {
-        using var bus = new EventBus();
         var secondRan = false;
-        IDisposable? second = null;
+        var second = new StrongBox<IDisposable>();
 
-        using IDisposable first = bus.Subscribe<CounterIncremented>(_ => second!.Dispose());
-        second = bus.Subscribe<CounterIncremented>(_ => secondRan = true);
+        using IDisposable first = _bus.Subscribe<CounterIncremented>(_ => second.Value!.Dispose());
+        second.Value = _bus.Subscribe<CounterIncremented>(_ => secondRan = true);
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
         Assert.True(secondRan, "the snapshot taken at publish time still includes it");
 
         secondRan = false;
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
         Assert.False(secondRan, "removal takes effect from the next publish");
     }
 
     [Fact]
     public async Task PublishAsync_AsyncHandler_Can_Unsubscribe_Itself()
     {
-        using var bus = new EventBus();
         var count = 0;
-        IDisposable? self = null;
+        var self = new StrongBox<IDisposable>();
 
-        self = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        self.Value = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             await Task.Yield();
             count++;
-            self!.Dispose();
+            self.Value!.Dispose();
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, count);
     }
@@ -448,20 +447,19 @@ public class EventBusTests
     [Fact]
     public async Task Subscribe_AsyncLambdaWithoutToken_IsAwaited_NotFireAndForget()
     {
-        using var bus = new EventBus();
         var completed = false;
 
         // A one-parameter async lambda must bind to Subscribe(Func<TEvent, Task>).
         // If it bound to the Action<TEvent> overload it would be `async void`:
         // PublishAsync would return before the delay elapsed and `completed`
         // would still be false here.
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(async e =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(async _ =>
         {
             await Task.Delay(25, TestContext.Current.CancellationToken);
             completed = true;
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.True(completed);
     }
@@ -469,7 +467,6 @@ public class EventBusTests
     [Fact]
     public async Task Subscribe_TaskReturningMethodGroup_IsAwaited()
     {
-        using var bus = new EventBus();
         var completed = false;
 
         async Task Handle(CounterIncremented e)
@@ -478,8 +475,8 @@ public class EventBusTests
             completed = true;
         }
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(Handle);
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(Handle);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.True(completed);
     }
@@ -487,22 +484,21 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_InvokesAllThreeHandlerKindsInOrder()
     {
-        using var bus = new EventBus();
         var order = new List<string>();
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => order.Add("sync"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async _ =>
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(_ => order.Add("sync"));
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(async _ =>
         {
             await Task.Yield();
             order.Add("task");
         });
-        using IDisposable s3 = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        using IDisposable s3 = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             await Task.Yield();
             order.Add("task+ct");
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(["sync", "task", "task+ct"], order);
     }
@@ -510,16 +506,15 @@ public class EventBusTests
     [Fact]
     public async Task Subscribe_TaskOverload_ExceptionsAreAggregated()
     {
-        using var bus = new EventBus();
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(async _ =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(async _ =>
         {
             await Task.Yield();
             throw new InvalidOperationException("boom");
         });
 
         var ex = await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
 
         Assert.IsType<InvalidOperationException>(Assert.Single(ex.InnerExceptions));
     }
@@ -527,18 +522,17 @@ public class EventBusTests
     [Fact]
     public async Task Subscribe_TaskOverload_DisposeStopsReceivingEvents()
     {
-        using var bus = new EventBus();
         var count = 0;
 
-        IDisposable subscription = bus.Subscribe<CounterIncremented>(_ =>
+        IDisposable subscription = _bus.Subscribe<CounterIncremented>(_ =>
         {
             count++;
             return Task.CompletedTask;
         });
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
         subscription.Dispose();
-        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, count);
     }
@@ -548,14 +542,13 @@ public class EventBusTests
     [InlineData(false)]
     public async Task PublishAsync_AsyncHandlerReturnsNullTask_ThrowsDescriptiveError(bool withToken)
     {
-        using var bus = new EventBus();
 
         using IDisposable _ = withToken
-            ? bus.Subscribe<CounterIncremented>((Func<CounterIncremented, CancellationToken, Task>)((_, _) => null!))
-            : bus.Subscribe<CounterIncremented>((Func<CounterIncremented, Task>)(_ => null!));
+            ? _bus.Subscribe<CounterIncremented>((_, _) => null!)
+            : _bus.Subscribe<CounterIncremented>(_ => null!);
 
         var ex = await Assert.ThrowsAsync<AggregateException>(
-            () => bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
+            () => _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken));
 
         var inner = Assert.IsType<InvalidOperationException>(Assert.Single(ex.InnerExceptions));
         Assert.Contains("null Task", inner.Message, StringComparison.Ordinal);
@@ -567,21 +560,22 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_RoutesOnStaticType_NotRuntimeType()
     {
-        using var bus = new EventBus();
         var baseHits = 0;
         var derivedHits = 0;
 
-        using IDisposable s1 = bus.Subscribe<BaseEvent>(_ => baseHits++);
-        using IDisposable s2 = bus.Subscribe<DerivedEvent>(_ => derivedHits++);
+        string? baseName = null;
+        using IDisposable s1 = _bus.Subscribe<BaseEvent>(e => { baseHits++; baseName = e.Name; });
+        using IDisposable s2 = _bus.Subscribe<DerivedEvent>(_ => derivedHits++);
 
         // Static type is BaseEvent even though the instance is a DerivedEvent.
         BaseEvent asBase = new DerivedEvent("x");
-        await bus.PublishAsync(asBase, TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(asBase, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, baseHits);
         Assert.Equal(0, derivedHits);
+        Assert.Equal("x", baseName);
 
-        await bus.PublishAsync(new DerivedEvent("x"), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new DerivedEvent("x"), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, baseHits);
         Assert.Equal(1, derivedHits);
@@ -590,26 +584,24 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_ValueTypeEvent_IsDelivered()
     {
-        using var bus = new EventBus();
         TickEvent received = default;
 
-        using IDisposable _ = bus.Subscribe<TickEvent>(e => received = e);
-        await bus.PublishAsync(new TickEvent(99), TestContext.Current.CancellationToken);
+        using IDisposable _ = _bus.Subscribe<TickEvent>(e => received = e);
+        await _bus.PublishAsync(new TickEvent(99), TestContext.Current.CancellationToken);
 
-        Assert.Equal(new TickEvent(99), received);
+        Assert.Equal(99, received.Ticks);
     }
 
     [Fact]
     public async Task Subscribe_SameHandlerTwice_InvokedTwice()
     {
-        using var bus = new EventBus();
         var count = 0;
         void Handler(CounterIncremented e) => count++;
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(Handler);
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(Handler);
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(Handler);
+        using IDisposable s2 = _bus.Subscribe<CounterIncremented>(Handler);
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(2, count);
     }
@@ -617,14 +609,13 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_ReentrantPublishFromHandler_IsDelivered()
     {
-        using var bus = new EventBus();
         var loginHits = 0;
 
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(async (_, ct) =>
-            await bus.PublishAsync(new UserLoggedIn("u"), ct));
-        using IDisposable s2 = bus.Subscribe<UserLoggedIn>(_ => loginHits++);
+        using IDisposable s1 = _bus.Subscribe<CounterIncremented>(async (_, ct) =>
+            await _bus.PublishAsync(new UserLoggedIn("u"), ct));
+        using IDisposable s2 = _bus.Subscribe<UserLoggedIn>(_ => loginHits++);
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, loginHits);
     }
@@ -632,10 +623,9 @@ public class EventBusTests
     [Fact]
     public async Task PublishAsync_AllSyncHandlers_CompletesSynchronously()
     {
-        using var bus = new EventBus();
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(_ => { });
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(_ => { });
 
-        Task publish = bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        Task publish = _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.True(publish.IsCompletedSuccessfully, "no thread hop when every handler is synchronous");
         await publish;
@@ -646,17 +636,16 @@ public class EventBusTests
     [Fact]
     public async Task Subscription_Dispose_IsIdempotent()
     {
-        using var bus = new EventBus();
         var count = 0;
         var other = 0;
 
-        IDisposable subscription = bus.Subscribe<CounterIncremented>(_ => count++);
-        using IDisposable keep = bus.Subscribe<CounterIncremented>(_ => other++);
+        IDisposable subscription = _bus.Subscribe<CounterIncremented>(_ => count++);
+        using IDisposable keep = _bus.Subscribe<CounterIncremented>(_ => other++);
 
         subscription.Dispose();
         subscription.Dispose(); // must not throw, must not remove `keep`
 
-        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        await _bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(0, count);
         Assert.Equal(1, other);
@@ -678,13 +667,12 @@ public class EventBusTests
     [Fact]
     public async Task Concurrent_SubscribeAndPublishAsync_DoesNotCrashOrLoseSubscribers()
     {
-        using var bus = new EventBus();
         var hits = 0;
 
         // Pre-existing subscriber. Subscribers added mid-flight may or may not
         // observe a concurrent publish — the guarantee is only "no crash, no
         // corruption". We assert the pre-existing subscriber sees all events.
-        using IDisposable baseline = bus.Subscribe<CounterIncremented>(_ => Interlocked.Increment(ref hits));
+        using IDisposable baseline = _bus.Subscribe<CounterIncremented>(_ => Interlocked.Increment(ref hits));
 
         const int publishers = 4;
         const int subscribers = 4;
@@ -697,7 +685,7 @@ public class EventBusTests
             {
                 for (var i = 0; i < iterations; i++)
                 {
-                    await bus.PublishAsync(new CounterIncremented(i), TestContext.Current.CancellationToken);
+                    await _bus.PublishAsync(new CounterIncremented(i), TestContext.Current.CancellationToken);
                 }
             }, TestContext.Current.CancellationToken));
         }
@@ -708,7 +696,7 @@ public class EventBusTests
             {
                 for (var i = 0; i < iterations; i++)
                 {
-                    using IDisposable sub = bus.Subscribe<CounterIncremented>(_ => { });
+                    using IDisposable sub = _bus.Subscribe<CounterIncremented>(_ => { });
                 }
             }, TestContext.Current.CancellationToken));
         }
@@ -721,10 +709,9 @@ public class EventBusTests
     [Fact]
     public async Task Concurrent_PublishAsync_DoesNotCorrupt()
     {
-        using var bus = new EventBus();
         var hits = 0;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(async (_, _) =>
+        using IDisposable _ = _bus.Subscribe<CounterIncremented>(async (_, _) =>
         {
             await Task.Yield();
             Interlocked.Increment(ref hits);
@@ -738,7 +725,7 @@ public class EventBusTests
             {
                 for (var i = 0; i < iterations; i++)
                 {
-                    await bus.PublishAsync(new CounterIncremented(i), TestContext.Current.CancellationToken);
+                    await _bus.PublishAsync(new CounterIncremented(i), TestContext.Current.CancellationToken);
                 }
             }, TestContext.Current.CancellationToken)));
 
@@ -748,6 +735,9 @@ public class EventBusTests
     [Fact]
     public async Task Concurrent_DisposeBus_DuringPublishAndSubscribe_IsClean()
     {
+        // This test exists to race Dispose against Subscribe, so the captured bus
+        // really can be disposed while these closures run — that is the scenario
+        // under test, not an oversight.
         var bus = new EventBus();
         using IDisposable baseline = bus.Subscribe<CounterIncremented>(_ => { });
 
@@ -762,6 +752,7 @@ public class EventBusTests
                 // anything else — or a hang — is a defect.
                 try
                 {
+                    // ReSharper disable once AccessToDisposedClosure -- deliberate; see above.
                     bus.Subscribe<CounterIncremented>(_ => { }).Dispose();
                 }
                 catch (ObjectDisposedException)
@@ -817,7 +808,7 @@ public class DefaultInterfaceImplementationTests
         IEventBus bus = legacy;
         var completed = false;
 
-        using IDisposable _ = bus.Subscribe<CounterIncremented>(async e =>
+        using IDisposable _ = bus.Subscribe<CounterIncremented>(async _ =>
         {
             await Task.Delay(25, TestContext.Current.CancellationToken);
             completed = true;

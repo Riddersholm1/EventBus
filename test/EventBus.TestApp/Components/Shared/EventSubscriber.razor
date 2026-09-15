@@ -31,7 +31,8 @@
         _subscriptions.Add(EventBus.Subscribe<MessageSent>(e =>
         {
             _lastMessage = e.Text;
-            Log($"Message: {e.Text}");
+            // Report when the event was published, not when it was logged.
+            Log($"Message: {e.Text} (sent {e.Timestamp:HH:mm:ss})");
         }));
 
         _subscriptions.Add(EventBus.Subscribe<CounterChanged>(e =>

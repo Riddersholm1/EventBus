@@ -171,7 +171,7 @@ public class ServiceCollectionExtensionsTests
     {
         var services = new ServiceCollection();
         services.AddEventBus(ServiceLifetime.Scoped);
-        using ServiceProvider provider = services.BuildServiceProvider();
+        await using ServiceProvider provider = services.BuildServiceProvider();
         using IServiceScope scope = provider.CreateScope();
 
         var bus = scope.ServiceProvider.GetRequiredService<IEventBus>();
