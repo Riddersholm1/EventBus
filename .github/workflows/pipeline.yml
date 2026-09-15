@@ -59,8 +59,14 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c ${{ env.CONFIGURATION }} -warnaserror -p:ContinuousIntegrationBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
 
+      # xunit.v3 4.x runs on Microsoft.Testing.Platform, so the old VSTest flags
+      # (--logger trx, --collect "XPlat Code Coverage") no longer apply. Options
+      # after `--` go to the test runner itself.
       - name: Test
-        run: dotnet test --no-build -c ${{ env.CONFIGURATION }} --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage"
+        run: >
+          dotnet test --no-build -c ${{ env.CONFIGURATION }} --
+          --report-xunit-trx --report-xunit-trx-filename test-results.trx
+          --coverage --coverage-output-format cobertura --coverage-output coverage.cobertura.xml
 
       - name: Upload test results
         if: always()
