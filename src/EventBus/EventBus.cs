@@ -215,7 +215,7 @@ internal sealed class EventBus : IEventBus, IDisposable
         public abstract Task InvokeAsync(object @event, CancellationToken cancellationToken);
 
         /// <summary>
-        /// Thrown when a <see cref="Task"/>-returning handler hands back
+        /// Creates the exception thrown when a <see cref="Task"/>-returning handler hands back
         /// <see langword="null"/> — almost always an unstubbed mock. Without
         /// this the caller would see an opaque <see cref="NullReferenceException"/>
         /// with no indication of which handler was at fault.

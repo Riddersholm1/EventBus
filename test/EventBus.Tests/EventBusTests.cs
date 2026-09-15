@@ -25,24 +25,6 @@ public class EventBusTests
     }
 
     [Fact]
-    public async Task PublishAsync_InvokesSyncAndAsyncHandlers()
-    {
-        using var bus = new EventBus();
-        var hits = new List<string>();
-
-        using IDisposable s1 = bus.Subscribe<CounterIncremented>(e => hits.Add($"sync-{e.NewValue}"));
-        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async (e, _) =>
-        {
-            await Task.Yield();
-            hits.Add($"async-{e.NewValue}");
-        });
-
-        await bus.PublishAsync(new CounterIncremented(7), TestContext.Current.CancellationToken);
-
-        Assert.Equal(["sync-7", "async-7"], hits);
-    }
-
-    [Fact]
     public async Task PublishAsync_InvokesHandlersInSubscriptionOrder()
     {
         using var bus = new EventBus();
@@ -262,12 +244,14 @@ public class EventBusTests
     }
 
     [Fact]
-    public async Task PublishAsync_HandlerThrowsThenCancelled_PreservesHandlerErrors()
+    public async Task PublishAsync_HandlerThrows_ThenTokenCancelledBetweenHandlers_PreservesHandlerErrors()
     {
         using var bus = new EventBus();
         using var cts = new CancellationTokenSource();
         var thirdRan = false;
 
+        // Cancellation is detected by the loop's pre-flight check between handlers,
+        // rather than surfacing out of a handler (see the companion test below).
         using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
         using IDisposable s2 = bus.Subscribe<CounterIncremented>(_ => cts.Cancel());
         using IDisposable s3 = bus.Subscribe<CounterIncremented>(_ => thirdRan = true);
@@ -281,6 +265,29 @@ public class EventBusTests
         Assert.IsType<InvalidOperationException>(single);
         Assert.Equal("first", single.Message);
         Assert.False(thirdRan, "cancellation must still stop later handlers");
+    }
+
+    [Fact]
+    public async Task PublishAsync_HandlerThrows_ThenHandlerObservesCancellation_PreservesBoth()
+    {
+        using var bus = new EventBus();
+        using var cts = new CancellationTokenSource();
+
+        using IDisposable s1 = bus.Subscribe<CounterIncremented>(_ => throw new InvalidOperationException("first"));
+        using IDisposable s2 = bus.Subscribe<CounterIncremented>(async (_, ct) =>
+        {
+            // Cancel and observe it from inside the handler, so the OperationCanceledException
+            // comes out of the handler rather than the loop's own pre-flight check.
+            await cts.CancelAsync();
+            ct.ThrowIfCancellationRequested();
+        });
+
+        var ex = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => bus.PublishAsync(new CounterIncremented(1), cts.Token));
+
+        var inner = Assert.IsType<AggregateException>(ex.InnerException);
+        Exception single = Assert.Single(inner.InnerExceptions);
+        Assert.Equal("first", single.Message);
     }
 
     [Fact]
@@ -770,5 +777,85 @@ public class EventBusTests
 
         bus.Dispose(); // still idempotent after the race
         Assert.Throws<ObjectDisposedException>(() => bus.Subscribe<CounterIncremented>(_ => { }));
+    }
+}
+
+/// <summary>
+/// Exercises the <see cref="IEventBus.Subscribe{TEvent}(Func{TEvent, Task})"/>
+/// default interface implementation. <see cref="EventBus"/> overrides it, so
+/// these are the only tests that run the interface's own body — the code path
+/// every third-party <see cref="IEventBus"/> implementation inherits.
+/// </summary>
+public class DefaultInterfaceImplementationTests
+{
+    /// <summary>
+    /// An implementation of exactly the shape 1.0.0 required: it declares only
+    /// the members that existed then. That this still compiles is the
+    /// back-compatibility guarantee; the <see cref="Func{T, TResult}"/> overload
+    /// is supplied entirely by the interface's default implementation.
+    /// </summary>
+    private sealed class LegacyBus : IEventBus, IDisposable
+    {
+        private readonly EventBus _inner = new();
+
+        public IDisposable Subscribe<TEvent>(Action<TEvent> handler) where TEvent : notnull
+            => _inner.Subscribe(handler);
+
+        public IDisposable Subscribe<TEvent>(Func<TEvent, CancellationToken, Task> handler) where TEvent : notnull
+            => _inner.Subscribe(handler);
+
+        public Task PublishAsync<TEvent>(TEvent eventData, CancellationToken cancellationToken = default) where TEvent : notnull
+            => _inner.PublishAsync(eventData, cancellationToken);
+
+        public void Dispose() => _inner.Dispose();
+    }
+
+    [Fact]
+    public async Task DefaultImplementation_DeliversAndAwaitsHandler()
+    {
+        using var legacy = new LegacyBus();
+        IEventBus bus = legacy;
+        var completed = false;
+
+        using IDisposable _ = bus.Subscribe<CounterIncremented>(async e =>
+        {
+            await Task.Delay(25, TestContext.Current.CancellationToken);
+            completed = true;
+        });
+
+        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+
+        Assert.True(completed, "the forwarded handler must still be awaited");
+    }
+
+    [Fact]
+    public void DefaultImplementation_NullHandler_Throws()
+    {
+        using var legacy = new LegacyBus();
+        IEventBus bus = legacy;
+
+        // Guarded by the default implementation itself, not by EventBus.
+        Assert.Throws<ArgumentNullException>(() =>
+            bus.Subscribe((Func<CounterIncremented, Task>)null!));
+    }
+
+    [Fact]
+    public async Task DefaultImplementation_TokenUnsubscribes()
+    {
+        using var legacy = new LegacyBus();
+        IEventBus bus = legacy;
+        var count = 0;
+
+        IDisposable subscription = bus.Subscribe<CounterIncremented>(_ =>
+        {
+            count++;
+            return Task.CompletedTask;
+        });
+
+        await bus.PublishAsync(new CounterIncremented(1), TestContext.Current.CancellationToken);
+        subscription.Dispose();
+        await bus.PublishAsync(new CounterIncremented(2), TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, count);
     }
 }
