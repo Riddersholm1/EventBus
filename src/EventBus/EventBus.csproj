@@ -12,7 +12,7 @@
 
 		<!-- Fail the build on any accidental break of the published API surface. -->
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>1.0.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>1.1.0</PackageValidationBaselineVersion>
 
 		<!-- NuGet package metadata -->
 		<PackageId>Riddersholm.EventBus</PackageId>

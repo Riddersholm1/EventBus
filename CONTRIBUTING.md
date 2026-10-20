@@ -56,7 +56,7 @@ EventBus follows semantic versioning. Two things check it:
 
 - **Package validation.** `EnablePackageValidation` and `PackageValidationBaselineVersion` in
   [`src/EventBus/EventBus.csproj`](src/EventBus/EventBus.csproj) make every `dotnet pack` download that
-  published release (today `1.0.0`) and compare the new package with it. Removing or changing a
+  published release (today `1.1.0`) and compare the new package with it. Removing or changing a
   published member fails the pack with `CP0002` and similar errors, naming the member. A major release
   is the one place to accept a break: pack once with `-p:ApiCompatGenerateSuppressionFile=true`, which
   writes the accepted differences to a `CompatibilitySuppressions.xml` next to the project, and commit
