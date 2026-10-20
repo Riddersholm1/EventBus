@@ -139,13 +139,13 @@ jobs:
           dotnet-quality: ${{ env.DOTNET_QUALITY }}
 
       - name: Download packages
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: nuget-packages
           path: ./artifacts
 
       - name: Download symbols
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: nuget-symbols
           path: ./artifacts
