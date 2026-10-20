@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: test-results
           path: "**/*.trx"
@@ -106,13 +106,13 @@ jobs:
           /p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Upload NuGet package
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: nuget-packages
           path: ./artifacts/*.nupkg
 
       - name: Upload symbol package
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: nuget-symbols
           path: ./artifacts/*.snupkg
