@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # These move together and are only ever consumed by test projects, so one PR is enough.
+      test-dependencies:
+        patterns:
+          - "xunit*"
+          - "FsCheck*"
+          - "Microsoft.Testing.*"
+          - "SQLitePCLRaw*"
+      entity-framework:
+        patterns:
+          - "Microsoft.EntityFrameworkCore*"
+    ignore:
+      # Pinned deliberately below the SDK's own Roslyn so the analyzer package stays loadable by
+      # older tooling — see src/Riddersholm.Money.Generators. Raising it is a compatibility decision.
+      # Analyzers is listed too: a major bump of it drags CSharp along in one "multi" PR, which is how
+      # #12 proposed Roslyn 5.9 despite the CSharp rule.
+      - dependency-name: "Microsoft.CodeAnalysis.CSharp"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.CodeAnalysis.Analyzers"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
